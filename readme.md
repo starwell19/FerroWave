@@ -292,6 +292,8 @@ Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 * **Discussions**: [GitHub Discussions](https://github.com/matoslav/FerroWave/discussions)
 * **MakerWorld**: https://makerworld.com/en/crowdfunding/70-ferrowave
 
+If you want to support me and my FerroWave development, you can buy me a coffee at: https://ko-fi.com/makarov87
+
 ---
 
 ## Credits
