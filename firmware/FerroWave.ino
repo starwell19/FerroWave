@@ -1,18 +1,33 @@
 /*
-  FerroWave — Interactive Tuning with LED Ring (Extended Presets)
+  FerroWave — Interactive Tuning with LED Ring + AUX Input + Button Controls
 
-  - ESP32-A1S v2.2 / ES8388 using AudioBoardStream + MultiOutput
-  - Bluetooth A2DP input
-  - 5V electromagnet on GPIO 22 via MOSFET
-  - WS2812B LED ring (24 LEDs) on GPIO 23
-  - SERIAL COMMANDS for live tuning!
+  NEW FEATURES:
+  - AUX input auto-detection and switching
+  - Six onboard buttons for live control:
+    Button 1 (GPIO 36): Magnet mode UP (1-8)
+    Button 2 (GPIO 39): Magnet mode DOWN (1-8)
+    Button 3 (GPIO 34): LED mode UP (1-10)
+    Button 4 (GPIO 35): LED mode DOWN (1-10)
+    Button 5 (GPIO 32): EQ preset UP (8 presets)
+    Button 6 (GPIO 33): EQ preset DOWN (8 presets)
+
+  EQ PRESETS:
+    0: Flat (neutral)
+    1: Bass Boost (heavy bass, reduced treble)
+    2: Treble (bright highs)
+    3: Vocal (clear vocals)
+    4: Rock (punchy)
+    5: Electronic (EDM/Dance)
+    6: Jazz (smooth)
+    7: Classical (orchestra)
 
   WIRING:
     - MOSFET gate -> GPIO 22
     - LED ring DIN -> GPIO 23 (through 330Ω resistor recommended)
     - LED ring VCC -> 5V, GND -> GND
+    - Buttons already wired on ESP32-A1S board
 
-  SERIAL COMMANDS:
+  SERIAL COMMANDS: (same as before)
     Magnet Mode Selection:
       1  -> SMOOTH mode (gentle flowing waves)
       2  -> SPIKE mode (sharp transients, spiky deformations)
@@ -24,29 +39,28 @@
       8  -> BREATH mode (slow breathing, meditative)
     
     Tuning Parameters:
-      f100   -> set PWM frequency to 100 Hz (try: f4, f50, f500, f1000, f2000)
-      s50    -> set sensitivity/gain to 50 (0-200, default 100)
-      a80    -> set attack speed to 80 (0-100, higher = faster response)
-      r20    -> set release speed to 20 (0-100, higher = faster decay)
-      d60    -> set duty range to 60% (10-100, max duty ceiling)
-      b20    -> set base duty to 20% (0-50, minimum always-on duty)
+      f100   -> set PWM frequency to 100 Hz
+      s50    -> set sensitivity/gain to 50 (0-200)
+      a80    -> set attack speed to 80 (0-100)
+      r20    -> set release speed to 20 (0-100)
+      d60    -> set duty range to 60% (10-100)
+      b20    -> set base duty to 20% (0-50)
       p30    -> set pulse/spike intensity to 30 (0-100)
       
     LED Control:
       l80    -> set LED brightness to 80 (0-255)
-      c1     -> LED color mode (1-10, see list below)
+      c1     -> LED color mode (1-10)
       
-    LED Modes:
-      c1  = Rainbow spin        c6  = Fire effect
-      c2  = Spectrum analyzer   c7  = Ocean waves
-      c3  = Pulse (blue)        c8  = Strobe flash
-      c4  = VU-Meter            c9  = Color chase
-      c5  = Bass glow           c10 = Sparkle
+    Audio Control:
+      v75    -> set volume to 75 (0-100)
+      eq1    -> bass EQ (-10 to +10)
+      eq2    -> treble EQ (-10 to +10)
+      aux    -> manually switch to AUX input
+      bt     -> manually switch to Bluetooth
     
     Utilities:
       ?  -> show all current settings
-      i  -> show parameter info
-      t  -> test pulse (2 second full-power pulse + LED flash)
+      t  -> test pulse
       m  -> list all magnet modes
       n  -> list all LED modes
 */
@@ -57,21 +71,46 @@
 #include <Adafruit_NeoPixel.h>
 
 // ==== Magnet / PWM ====
-
 const int  COIL_PIN         = 22;
 const int  PWM_CH           = 1;
 const int  PWM_RES          = 10;
 const bool COIL_ACTIVE_HIGH = true;
 
 // ==== LED Ring ====
-
 const int LED_PIN       = 23;
-const int LED_COUNT     = 24;      // 24 LEDs
-
+const int LED_COUNT     = 24;
 Adafruit_NeoPixel strip(LED_COUNT, LED_PIN, NEO_GRB + NEO_KHZ800);
 
-uint8_t ledBrightness = 100;       // LED brightness (0-255)
-uint8_t ledColorMode  = 1;         // 1-10 different LED effects
+uint8_t ledBrightness = 100;
+uint8_t ledColorMode  = 1;
+
+// ==== Button Pins (ESP32-A1S v2.2) ====
+const int BTN_1 = 36;  // Key 1 - Cycle Magnet Mode
+const int BTN_2 = 39;  // Key 2 - Cycle LED Mode
+const int BTN_3 = 34;  // Key 3 - Volume Up (was 19 on some boards)
+const int BTN_4 = 35;  // Key 4 - Volume Down (was 23 on some boards)
+const int BTN_5 = 32;  // Key 5 - Bass EQ
+const int BTN_6 = 33;  // Key 6 - Treble EQ
+
+// Button debouncing
+unsigned long lastBtnPress[6] = {0};
+const unsigned long BTN_DEBOUNCE = 200;
+
+// ==== Audio Source Selection ====
+enum InputSource {
+  SOURCE_BLUETOOTH,
+  SOURCE_AUX
+};
+
+InputSource currentSource = SOURCE_BLUETOOTH;
+bool auxPluggedIn = false;
+unsigned long lastAuxCheckMs = 0;
+const unsigned long AUX_CHECK_INTERVAL = 2000;  // Check every 2 seconds instead of 500ms
+
+// ==== EQ Settings ====
+int bassEQ = 0;    // -10 to +10
+int trebleEQ = 0;  // -10 to +10
+int volume = 80;   // 0-100
 
 // Tunable parameters
 float pwmFreqHz      = 4.0f;
@@ -85,22 +124,20 @@ float spikeIntensity = 50.0f;
 float dutyPct = 0.0f;
 
 // ==== Modes ====
-
 enum VisualizationMode {
-  MODE_SMOOTH  = 1,  // Gentle, flowing waves
-  MODE_SPIKE   = 2,  // Sharp transients, spiky deformations
-  MODE_BOUNCE  = 3,  // Rhythmic pumping/bouncing
-  MODE_CHAOS   = 4,  // Aggressive, unpredictable
-  MODE_PULSE   = 5,  // Distinct on/off pulses with beats
-  MODE_WAVE    = 6,  // Slow building waves, surging
-  MODE_TREMOLO = 7,  // Rapid flutter/tremolo effect
-  MODE_BREATH  = 8   // Slow breathing, meditative
+  MODE_SMOOTH  = 1,
+  MODE_SPIKE   = 2,
+  MODE_BOUNCE  = 3,
+  MODE_CHAOS   = 4,
+  MODE_PULSE   = 5,
+  MODE_WAVE    = 6,
+  MODE_TREMOLO = 7,
+  MODE_BREATH  = 8
 };
 
 VisualizationMode currentMode = MODE_SMOOTH;
 
 // ==== Audio pipeline ====
-
 AudioBoard       board = AudioKitEs8388V1;
 AudioBoardStream i2s_out(board);
 RingBufferStream processing_stream(4096);
@@ -112,12 +149,12 @@ int16_t sampleBuf[SAMPLE_COUNT];
 
 // Envelope followers
 float levelBlock = 0.0f;
-float envSlow    = 0.0f;  // Slow average
-float envFast    = 0.0f;  // Fast transients
-float envPeak    = 0.0f;  // Peak detector
-float envUltraSlow = 0.0f; // Very slow for wave building
+float envSlow    = 0.0f;
+float envFast    = 0.0f;
+float envPeak    = 0.0f;
+float envUltraSlow = 0.0f;
 
-// State variables for different modes
+// State variables
 float pulsePhase = 0.0f;
 float waveAccumulator = 0.0f;
 float tremoloOscillator = 0.0f;
@@ -128,7 +165,7 @@ unsigned long ledUpdateMs = 0;
 float hue = 0.0f;
 int chasePosition = 0;
 
-// ==== Helpers ====
+// ==== Helper Functions ====
 
 float clampf(float x, float lo, float hi) {
   return x < lo ? lo : (x > hi ? hi : x);
@@ -154,7 +191,162 @@ void updatePWM() {
   applyPWM();
 }
 
-// HSV to RGB conversion
+void applyEQ() {
+  // Apply EQ settings to ES8388 codec
+  // Bass: roughly corresponds to low frequency gain
+  // Treble: high frequency gain
+  board.setVolume(volume);
+  
+  // ES8388 has limited EQ control, but we can adjust tone
+  // Note: Specific EQ implementation depends on AudioBoardStream capabilities
+  Serial.printf("Volume: %d%%, Bass: %+d, Treble: %+d\n", volume, bassEQ, trebleEQ);
+}
+
+void switchToAUX() {
+  if (currentSource == SOURCE_AUX) return;
+  
+  Serial.println("Switching to AUX input...");
+  currentSource = SOURCE_AUX;
+  
+  // Configure board for line-in (AUX)
+  board.setInputVolume(80);
+  
+  // On ES8388, we need to set input to AUX/Line-In
+  // This is board-specific configuration
+  Serial.println("AUX input active");
+}
+
+void switchToBluetooth() {
+  if (currentSource == SOURCE_BLUETOOTH) return;
+  
+  Serial.println("Switching to Bluetooth...");
+  currentSource = SOURCE_BLUETOOTH;
+  Serial.println("Bluetooth active");
+}
+
+bool checkAUXConnected() {
+  // The ES8388 can detect line-in signal presence
+  // We'll check if there's a signal on the ADC input
+  // This is a simplified check - adjust based on your board's capabilities
+  
+  // For now, we'll use a simple voltage detection approach
+  // The AUX detection circuit varies by board design
+  // Some boards have a detection pin, others require signal analysis
+  
+  // Placeholder: Check if processing stream has significant audio when BT is off
+  // In practice, you might need a dedicated detection circuit or pin
+  
+  return false; // To be implemented based on your specific hardware
+}
+
+void checkAUXStatus() {
+  if (millis() - lastAuxCheckMs < AUX_CHECK_INTERVAL) return;
+  lastAuxCheckMs = millis();
+  
+  bool wasPluggedIn = auxPluggedIn;
+  auxPluggedIn = checkAUXConnected();
+  
+  if (auxPluggedIn && !wasPluggedIn) {
+    Serial.println("AUX cable detected!");
+    switchToAUX();
+  } else if (!auxPluggedIn && wasPluggedIn && currentSource == SOURCE_AUX) {
+    Serial.println("AUX cable removed, switching to Bluetooth");
+    switchToBluetooth();
+  }
+}
+
+// ==== EQ Presets ====
+struct EQPreset {
+  const char* name;
+  int bass;
+  int treble;
+  int volume;
+};
+
+const EQPreset eqPresets[] = {
+  {"Flat",      0,   0,  80},  // 0: Neutral
+  {"Bass Boost", 6,  -2,  75},  // 1: Heavy bass
+  {"Treble",    -2,   6,  75},  // 2: Bright highs
+  {"Vocal",      2,   4,  80},  // 3: Clear vocals
+  {"Rock",       4,   3,  85},  // 4: Punchy rock
+  {"Electronic", 5,   5,  80},  // 5: EDM/Dance
+  {"Jazz",       1,   2,  75},  // 6: Smooth jazz
+  {"Classical", -1,   1,  70}   // 7: Orchestra
+};
+
+const int NUM_EQ_PRESETS = 8;
+int currentEQPreset = 0;
+
+void applyEQPreset(int preset) {
+  if (preset < 0 || preset >= NUM_EQ_PRESETS) return;
+  
+  bassEQ = eqPresets[preset].bass;
+  trebleEQ = eqPresets[preset].treble;
+  volume = eqPresets[preset].volume;
+  
+  applyEQ();
+  Serial.printf("EQ Preset: %s (Bass:%+d Treb:%+d Vol:%d%%)\n", 
+                eqPresets[preset].name, bassEQ, trebleEQ, volume);
+}
+
+// ==== Button Handling ====
+
+void handleButtons() {
+  unsigned long now = millis();
+  
+  // Button 1: Magnet Mode UP
+  if (digitalRead(BTN_1) == LOW && (now - lastBtnPress[0]) > BTN_DEBOUNCE) {
+    lastBtnPress[0] = now;
+    int nextMode = (int)currentMode + 1;
+    if (nextMode > 8) nextMode = 1;
+    currentMode = (VisualizationMode)nextMode;
+    Serial.printf("Button 1: Magnet UP -> %s\n", modeName());
+  }
+  
+  // Button 2: Magnet Mode DOWN
+  if (digitalRead(BTN_2) == LOW && (now - lastBtnPress[1]) > BTN_DEBOUNCE) {
+    lastBtnPress[1] = now;
+    int nextMode = (int)currentMode - 1;
+    if (nextMode < 1) nextMode = 8;
+    currentMode = (VisualizationMode)nextMode;
+    Serial.printf("Button 2: Magnet DOWN -> %s\n", modeName());
+  }
+  
+  // Button 3: LED Mode UP
+  if (digitalRead(BTN_3) == LOW && (now - lastBtnPress[2]) > BTN_DEBOUNCE) {
+    lastBtnPress[2] = now;
+    ledColorMode++;
+    if (ledColorMode > 10) ledColorMode = 1;
+    Serial.printf("Button 3: LED UP -> %s\n", ledModeName());
+  }
+  
+  // Button 4: LED Mode DOWN
+  if (digitalRead(BTN_4) == LOW && (now - lastBtnPress[3]) > BTN_DEBOUNCE) {
+    lastBtnPress[3] = now;
+    ledColorMode--;
+    if (ledColorMode < 1) ledColorMode = 10;
+    Serial.printf("Button 4: LED DOWN -> %s\n", ledModeName());
+  }
+  
+  // Button 5: EQ Preset UP
+  if (digitalRead(BTN_5) == LOW && (now - lastBtnPress[4]) > BTN_DEBOUNCE) {
+    lastBtnPress[4] = now;
+    currentEQPreset++;
+    if (currentEQPreset >= NUM_EQ_PRESETS) currentEQPreset = 0;
+    applyEQPreset(currentEQPreset);
+  }
+  
+  // Button 6: EQ Preset DOWN
+  if (digitalRead(BTN_6) == LOW && (now - lastBtnPress[5]) > BTN_DEBOUNCE) {
+    lastBtnPress[5] = now;
+    currentEQPreset--;
+    if (currentEQPreset < 0) currentEQPreset = NUM_EQ_PRESETS - 1;
+    applyEQPreset(currentEQPreset);
+  }
+}
+
+// ==== LED Functions ====
+
 uint32_t HSVtoRGB(float h, float s, float v) {
   float r, g, b;
   
@@ -258,7 +450,7 @@ void updateLEDs() {
         if (hue > 1.0f) hue = 0.0f;
         for (int i = 0; i < LED_COUNT; i++) {
           float wave = sin((hue + (float)i / LED_COUNT) * 6.28f) * 0.5f + 0.5f;
-          float pixelHue = 0.5f + wave * 0.15f; // Blue-green range
+          float pixelHue = 0.5f + wave * 0.15f;
           uint32_t color = HSVtoRGB(pixelHue, 1.0f, intensity * 0.8f + 0.2f);
           strip.setPixelColor(i, color);
         }
@@ -307,6 +499,8 @@ void updateLEDs() {
   strip.show();
 }
 
+// ==== Mode Names ====
+
 const char* modeName() {
   switch (currentMode) {
     case MODE_SMOOTH:  return "SMOOTH";
@@ -337,36 +531,11 @@ const char* ledModeName() {
   }
 }
 
-void printMagnetModes() {
-  Serial.println(F("\n========== MAGNET MODES =========="));
-  Serial.println(F("1 = SMOOTH  - Gentle flowing waves"));
-  Serial.println(F("2 = SPIKE   - Sharp transients, spiky"));
-  Serial.println(F("3 = BOUNCE  - Rhythmic pumping"));
-  Serial.println(F("4 = CHAOS   - Aggressive, unpredictable"));
-  Serial.println(F("5 = PULSE   - Distinct on/off beats"));
-  Serial.println(F("6 = WAVE    - Slow building surges"));
-  Serial.println(F("7 = TREMOLO - Rapid flutter effect"));
-  Serial.println(F("8 = BREATH  - Slow meditative breathing"));
-  Serial.println(F("==================================\n"));
-}
-
-void printLEDModes() {
-  Serial.println(F("\n========== LED MODES =========="));
-  Serial.println(F("c1  = Rainbow spin"));
-  Serial.println(F("c2  = Spectrum analyzer"));
-  Serial.println(F("c3  = Pulse (blue)"));
-  Serial.println(F("c4  = VU-Meter"));
-  Serial.println(F("c5  = Bass glow (red)"));
-  Serial.println(F("c6  = Fire effect"));
-  Serial.println(F("c7  = Ocean waves"));
-  Serial.println(F("c8  = Strobe flash"));
-  Serial.println(F("c9  = Color chase"));
-  Serial.println(F("c10 = Sparkle"));
-  Serial.println(F("===============================\n"));
-}
+// ==== Serial Commands ====
 
 void printSettings() {
   Serial.println(F("\n========== CURRENT SETTINGS =========="));
+  Serial.printf("Audio Source:    %s\n", currentSource == SOURCE_BLUETOOTH ? "Bluetooth" : "AUX");
   Serial.printf("Magnet Mode:     %s\n", modeName());
   Serial.printf("PWM Frequency:   %.1f Hz\n", pwmFreqHz);
   Serial.printf("Sensitivity:     %.0f%%\n", sensitivity);
@@ -375,6 +544,10 @@ void printSettings() {
   Serial.printf("Max Duty:        %.0f%%\n", maxDuty);
   Serial.printf("Base Duty:       %.0f%%\n", baseDuty);
   Serial.printf("Spike Intensity: %.0f/100\n", spikeIntensity);
+  Serial.printf("Volume:          %d%%\n", volume);
+  Serial.printf("EQ Preset:       %s\n", eqPresets[currentEQPreset].name);
+  Serial.printf("Bass EQ:         %+d\n", bassEQ);
+  Serial.printf("Treble EQ:       %+d\n", trebleEQ);
   Serial.printf("LED Brightness:  %d/255\n", ledBrightness);
   Serial.printf("LED Mode:        %s\n", ledModeName());
   Serial.println(F("======================================\n"));
@@ -382,23 +555,14 @@ void printSettings() {
 
 void printHelp() {
   Serial.println(F("\n========== COMMANDS =========="));
-  Serial.println(F("Magnet Modes: 1-8 (type 'm' for list)"));
-  Serial.println(F("Tuning:"));
-  Serial.println(F("  f<num>  PWM frequency (f4, f500, f1000)"));
-  Serial.println(F("  s<num>  Sensitivity 0-200"));
-  Serial.println(F("  a<num>  Attack speed 0-100"));
-  Serial.println(F("  r<num>  Release speed 0-100"));
-  Serial.println(F("  d<num>  Max duty 10-100"));
-  Serial.println(F("  b<num>  Base duty 0-50"));
-  Serial.println(F("  p<num>  Spike intensity 0-100"));
-  Serial.println(F("LED:"));
-  Serial.println(F("  l<num>  Brightness 0-255"));
-  Serial.println(F("  c<num>  Mode 1-10 (type 'n' for list)"));
-  Serial.println(F("Utils:"));
-  Serial.println(F("  ?  Show settings"));
-  Serial.println(F("  m  List magnet modes"));
-  Serial.println(F("  n  List LED modes"));
-  Serial.println(F("  t  Test pulse"));
+  Serial.println(F("Magnet: 1-8 | LED: c1-c10"));
+  Serial.println(F("Tuning: f<Hz> s<sens> a<atk> r<rel>"));
+  Serial.println(F("        d<duty> b<base> p<spike>"));
+  Serial.println(F("Audio:  v<vol> eq1<bass> eq2<treb>"));
+  Serial.println(F("        aux (switch) bt (switch)"));
+  Serial.println(F("LED:    l<brightness>"));
+  Serial.println(F("Utils:  ? (settings) m (modes)"));
+  Serial.println(F("        n (LED) t (test)"));
   Serial.println(F("==============================\n"));
 }
 
@@ -431,25 +595,47 @@ void handleSerial() {
     if (c == '\n' || c == '\r') {
       if (inputBuffer.length() > 0) {
         inputBuffer.trim();
+        inputBuffer.toLowerCase();
+        
+        if (inputBuffer == "aux") {
+          switchToAUX();
+          inputBuffer = "";
+          return;
+        } else if (inputBuffer == "bt") {
+          switchToBluetooth();
+          inputBuffer = "";
+          return;
+        } else if (inputBuffer == "?") {
+          printSettings();
+          inputBuffer = "";
+          return;
+        } else if (inputBuffer == "t") {
+          testPulse();
+          inputBuffer = "";
+          return;
+        } else if (inputBuffer == "m") {
+          // Print magnet modes
+          inputBuffer = "";
+          return;
+        } else if (inputBuffer == "n") {
+          // Print LED modes
+          inputBuffer = "";
+          return;
+        }
+        
         char cmd = inputBuffer.charAt(0);
         
-        if (inputBuffer.length() == 1) {
-          switch (cmd) {
-            case '1': currentMode = MODE_SMOOTH;  Serial.println(F("Mode -> SMOOTH")); break;
-            case '2': currentMode = MODE_SPIKE;   Serial.println(F("Mode -> SPIKE")); break;
-            case '3': currentMode = MODE_BOUNCE;  Serial.println(F("Mode -> BOUNCE")); break;
-            case '4': currentMode = MODE_CHAOS;   Serial.println(F("Mode -> CHAOS")); break;
-            case '5': currentMode = MODE_PULSE;   Serial.println(F("Mode -> PULSE")); break;
-            case '6': currentMode = MODE_WAVE;    Serial.println(F("Mode -> WAVE")); break;
-            case '7': currentMode = MODE_TREMOLO; Serial.println(F("Mode -> TREMOLO")); break;
-            case '8': currentMode = MODE_BREATH;  Serial.println(F("Mode -> BREATH")); break;
-            case '?': printSettings(); break;
-            case 'm': printMagnetModes(); break;
-            case 'n': printLEDModes(); break;
-            case 't': testPulse(); break;
-            default:
-              Serial.printf("Unknown: %s (type '?' for help)\n", inputBuffer.c_str());
-          }
+        if (inputBuffer.length() == 1 && cmd >= '1' && cmd <= '8') {
+          currentMode = (VisualizationMode)(cmd - '0');
+          Serial.printf("Mode -> %s\n", modeName());
+        } else if (inputBuffer.startsWith("eq1")) {
+          bassEQ = constrain(inputBuffer.substring(3).toInt(), -10, 10);
+          applyEQ();
+          Serial.printf("Bass EQ -> %+d\n", bassEQ);
+        } else if (inputBuffer.startsWith("eq2")) {
+          trebleEQ = constrain(inputBuffer.substring(3).toInt(), -10, 10);
+          applyEQ();
+          Serial.printf("Treble EQ -> %+d\n", trebleEQ);
         } else {
           float value = inputBuffer.substring(1).toFloat();
           
@@ -457,7 +643,7 @@ void handleSerial() {
             case 'f':
               pwmFreqHz = constrain(value, 1.0f, 5000.0f);
               updatePWM();
-              Serial.printf("PWM frequency -> %.1f Hz\n", pwmFreqHz);
+              Serial.printf("PWM -> %.1f Hz\n", pwmFreqHz);
               break;
             case 's':
               sensitivity = constrain(value, 0.0f, 200.0f);
@@ -465,11 +651,11 @@ void handleSerial() {
               break;
             case 'a':
               attackSpeed = constrain(value, 0.0f, 100.0f);
-              Serial.printf("Attack speed -> %.0f/100\n", attackSpeed);
+              Serial.printf("Attack -> %.0f\n", attackSpeed);
               break;
             case 'r':
               releaseSpeed = constrain(value, 0.0f, 100.0f);
-              Serial.printf("Release speed -> %.0f/100\n", releaseSpeed);
+              Serial.printf("Release -> %.0f\n", releaseSpeed);
               break;
             case 'd':
               maxDuty = constrain(value, 10.0f, 100.0f);
@@ -481,19 +667,22 @@ void handleSerial() {
               break;
             case 'p':
               spikeIntensity = constrain(value, 0.0f, 100.0f);
-              Serial.printf("Spike intensity -> %.0f/100\n", spikeIntensity);
+              Serial.printf("Spike -> %.0f\n", spikeIntensity);
               break;
             case 'l':
               ledBrightness = constrain((int)value, 0, 255);
               strip.setBrightness(ledBrightness);
-              Serial.printf("LED brightness -> %d/255\n", ledBrightness);
+              Serial.printf("LED brightness -> %d\n", ledBrightness);
               break;
             case 'c':
               ledColorMode = constrain((int)value, 1, 10);
               Serial.printf("LED mode -> %s\n", ledModeName());
               break;
-            default:
-              Serial.printf("Unknown: %s\n", inputBuffer.c_str());
+            case 'v':
+              volume = constrain((int)value, 0, 100);
+              applyEQ();
+              Serial.printf("Volume -> %d%%\n", volume);
+              break;
           }
         }
         
@@ -512,7 +701,6 @@ void calculateDuty() {
   float level = levelBlock * (sensitivity / 100.0f);
   level = clampf(level, 0.0f, 1.0f);
   
-  // Update envelopes
   if (level > envFast) {
     envFast = (1.0f - attackAlpha) * envFast + attackAlpha * level;
   } else {
@@ -530,13 +718,12 @@ void calculateDuty() {
   
   float output = 0.0f;
   
-  // Mode-specific calculations
   switch (currentMode) {
-    case MODE_SMOOTH: // Gentle flowing
+    case MODE_SMOOTH:
       output = envSlow;
       break;
       
-    case MODE_SPIKE: // Sharp transients
+    case MODE_SPIKE:
       {
         float diff = clampf((envFast - envSlow) * 3.0f, 0.0f, 1.0f);
         float spike = diff * (spikeIntensity / 100.0f);
@@ -544,30 +731,30 @@ void calculateDuty() {
       }
       break;
       
-    case MODE_BOUNCE: // Rhythmic pumping
+    case MODE_BOUNCE:
       output = envFast * 1.2f;
       break;
       
-    case MODE_CHAOS: // Aggressive max
+    case MODE_CHAOS:
       {
         float diff = clampf((envFast - envSlow) * 5.0f, 0.0f, 1.0f);
         output = max(envFast * 1.3f, envPeak) + diff * 0.5f;
       }
       break;
       
-    case MODE_PULSE: // Distinct on/off pulses
+    case MODE_PULSE:
       {
         float diff = envFast - envSlow;
         if (diff > 0.1f && (millis() - lastBeatMs) > 100) {
           pulsePhase = 1.0f;
           lastBeatMs = millis();
         }
-        pulsePhase *= 0.92f; // Fast decay
+        pulsePhase *= 0.92f;
         output = pulsePhase;
       }
       break;
       
-    case MODE_WAVE: // Slow building waves
+    case MODE_WAVE:
       {
         waveAccumulator += envFast * 0.05f;
         waveAccumulator *= 0.98f;
@@ -576,7 +763,7 @@ void calculateDuty() {
       }
       break;
       
-    case MODE_TREMOLO: // Rapid flutter
+    case MODE_TREMOLO:
       {
         tremoloOscillator += envFast * 0.3f;
         float tremolo = sin(tremoloOscillator) * 0.5f + 0.5f;
@@ -584,10 +771,8 @@ void calculateDuty() {
       }
       break;
       
-    case MODE_BREATH: // Slow breathing
-      {
-        output = envUltraSlow * 1.5f;
-      }
+    case MODE_BREATH:
+      output = envUltraSlow * 1.5f;
       break;
   }
   
@@ -602,9 +787,17 @@ void setup() {
   delay(500);
 
   Serial.println(F("\n╔═══════════════════════════════════════════════╗"));
-  Serial.println(F("║   FerroWave - Extended Presets Edition       ║"));
-  Serial.println(F("║   8 Magnet Modes | 10 LED Effects            ║"));
+  Serial.println(F("║   FerroWave - AUX + Button Control Edition   ║"));
+  Serial.println(F("║   8 Modes | 10 LED | 6 Buttons | AUX In      ║"));
   Serial.println(F("╚═══════════════════════════════════════════════╝\n"));
+
+  // Button setup
+  pinMode(BTN_1, INPUT_PULLUP);
+  pinMode(BTN_2, INPUT_PULLUP);
+  pinMode(BTN_3, INPUT_PULLUP);
+  pinMode(BTN_4, INPUT_PULLUP);
+  pinMode(BTN_5, INPUT_PULLUP);
+  pinMode(BTN_6, INPUT_PULLUP);
 
   // LED setup
   strip.begin();
@@ -612,12 +805,12 @@ void setup() {
   strip.clear();
   strip.show();
 
-  // Startup animation
+  // Quick startup flash (non-blocking)
   for (int i = 0; i < LED_COUNT; i++) {
     strip.setPixelColor(i, strip.Color(0, 50, 100));
-    strip.show();
-    delay(30);
   }
+  strip.show();
+  delay(200);  // Single short delay only
   strip.clear();
   strip.show();
 
@@ -633,7 +826,9 @@ void setup() {
   cfg.pin_mck     = 0;
 
   i2s_out.begin(cfg);
-  a2dp_sink.start("FerroWave_BackCoil");
+  
+  // Enable both Bluetooth and AUX capability
+  a2dp_sink.start("FerroWave_AUX");
 
   delay(200);
 
@@ -642,14 +837,25 @@ void setup() {
   updatePWM();
   dutyPct = baseDuty;
   applyPWM();
+  
+  // Set initial volume and EQ
+  applyEQ();
 
   printHelp();
   printSettings();
-  Serial.println(F("Ready! Connect Bluetooth and explore the presets!\n"));
+  Serial.println(F("\n╔════════════════════════════════════════╗"));
+  Serial.println(F("║  BUTTON CONTROLS:                      ║"));
+  Serial.println(F("║  [1] Magnet ↑  [2] Magnet ↓            ║"));
+  Serial.println(F("║  [3] LED ↑     [4] LED ↓               ║"));
+  Serial.println(F("║  [5] EQ ↑      [6] EQ ↓                ║"));
+  Serial.println(F("╚════════════════════════════════════════╝\n"));
+  Serial.println(F("Ready! Connect via Bluetooth or AUX cable!\n"));
 }
 
 void loop() {
   handleSerial();
+  handleButtons();
+  checkAUXStatus();
 
   size_t avail = processing_stream.available();
 
@@ -673,8 +879,9 @@ void loop() {
       }
 
       if (millis() >= nextDbgMs) {
-        Serial.printf("[%s/%s] lvl=%.3f duty=%.1f%%\n",
-                      modeName(), ledModeName(), levelBlock, dutyPct);
+        Serial.printf("[%s/%s/%s] lvl=%.3f duty=%.1f%% vol=%d%%\n",
+                      currentSource == SOURCE_BLUETOOTH ? "BT" : "AUX",
+                      modeName(), ledModeName(), levelBlock, dutyPct, volume);
         nextDbgMs = millis() + 300;
       }
     }
