@@ -1,464 +1,332 @@
 # FerroWave
 
-Audio-reactive **ferrofluid** driver built on **ESP32-A1S (ES8388)**.  
-Streams Bluetooth audio (A2DP) into the on-board codec, extracts live envelopes, and drives:
+Audio-reactive **ferrofluid visualizer** built on **ESP32-A1S (ES8388)**.  
+Streams Bluetooth audio (A2DP) or AUX input into the on-board codec, extracts live envelopes, and drives:
 
-- a **coil + MOSFET trigger module** (PWM on GPIO 22) for ferrofluid motion  
-- a **WS2812B LED ring** (GPIO 23) for synced visuals  
+* a **coil + MOSFET trigger module** (PWM on GPIO 22) for ferrofluid motion
+* a **WS2812B LED ring** (GPIO 23) for synced visuals
+* **Six onboard buttons** for live preset control (no computer needed!)
 
-> Goal: a clean, reproducible prototype you can flash, tune from the Serial Monitor, and extend.
+> Created by **Makarov87** and **crowdfunded by the MakerWorld community**.  
+> Goal: a clean, reproducible prototype you can flash, tune from buttons or Serial Monitor, and extend.
+
+**Crowdfunding Campaign:** https://makerworld.com/en/crowdfunding/70-ferrowave
 
 ---
 
-## Project Status (Extended Presets Edition)
+## Acknowledgments
 
-This repo currently reflects the **“Extended Presets Edition”** firmware and the latest hardware layout.
+**This project was made possible by the MakerWorld community!**
 
-**Key recent changes:**
+FerroWave was successfully crowdfunded on MakerWorld, and it would not exist without the support, belief, and contributions of backers and makers from around the world.
 
-- Switched to a **low-side MOSFET trigger module** (AOD4184-style “trigger” board):
-  - Built-in flyback diode + status LED  
-  - 3.3 V logic input, 5–12 V coil output  
-  - Much more backer-friendly than raw MOSFET wiring
-- Added a **USB-C PD trigger module**:
-  - Use any common USB-C PD powerbank / charger  
-  - Negotiates a stable 5–12 V rail (configurable)  
-  - Lets us power **ESP32 + LEDs from 5 V**, and the **coil from a clean rail**
-- Finalized **pinout** to avoid conflicts with the ES8388 codec, onboard keys and amp enable:
-  - GPIO 22 → **MOSFET gate** (coil PWM)  
-  - GPIO 23 → **WS2812B LED DIN**  
-  - ES8388 on standard I²S pins (27 / 25 / 26 / 35 / 0)
+**Special thanks to:**
+- All MakerWorld backers who supported this campaign
+- The MakerWorld platform for enabling maker-driven innovation
+- Every contributor who helped bring this vision to life
+- The open-source community for incredible libraries and tools
 
-This firmware is considered the **last known good base** for further work.
+**Your support made this dream a reality. Thank you!** 🙏
+
+---
+
+## Project Status (AUX + Button Control Edition)
+
+This repo reflects the **latest "AUX + Button Control Edition"** firmware with the finalized hardware layout.
+
+**What's new in this version:**
+
+* **AUX Input Support**: Auto-detects when 3.5mm cable is plugged in and switches from Bluetooth
+* **Physical Button Controls**: Six onboard buttons for live control without serial/computer
+  + Cycle through magnet modes (8 presets)
+  + Cycle through LED effects (10 modes)
+  + Switch between EQ presets (8 audio profiles)
+* **Dual Input**: Seamlessly switch between Bluetooth and AUX input
+* **Non-blocking performance**: Fixed audio stuttering issues for smooth playback
+
+**Previous improvements:**
+
+* Switched to **4x18650 battery pack** with breadboard power distribution:
+  + Portable, cordless operation
+  + Clean 5V rail for all components
+  + 1-1.5 hours runtime typical
+  + Simple, no voltage converters needed
+* Low-side **MOSFET trigger module** (AOD4184-style):
+  + Built-in flyback diode + status LED
+  + 3.3 V logic input, 5V coil output
+  + Much more maker-friendly than raw MOSFET wiring
+* Finalized **pinout** to avoid conflicts with ES8388 codec and onboard buttons:
+  + GPIO 22 → **MOSFET gate** (coil PWM)
+  + GPIO 23 → **WS2812B LED DIN**
+  + ES8388 on standard I²S pins (27 / 25 / 26 / 35 / 0)
 
 ---
 
 ## Table of Contents
 
-- [Features](#features)
-- [Hardware](#hardware)
-- [Wiring (quick reference)](#wiring-quick-reference)
-- [Power (USB-C PD Trigger)](#power-usb-c-pd-trigger)
-- [Pinout](#pinout)
-- [Firmware Setup (Arduino IDE)](#firmware-setup-arduino-ide)
-- [Required Libraries](#required-libraries)
-- [Build & Upload](#build--upload)
-- [Serial Tuning Panel](#serial-tuning-panel)
-  - [Magnet Modes (1–8)](#magnet-modes-1-8)
-  - [LED Modes (c1–c10)](#led-modes-c1c10)
-  - [Tuning Parameters](#tuning-parameters)
-  - [Utility Commands](#utility-commands)
-  - [Recommended Presets](#recommended-presets)
-  - [Quick Tips](#quick-tips)
-  - [Parameter Cheat Sheet](#parameter-cheat-sheet)
-- [How to Use](#how-to-use)
-- [Troubleshooting](#troubleshooting)
-- [Roadmap / What’s Next](#roadmap--whats-next)
-- [Repository Layout](#repository-layout)
-- [License](#license)
+* [Features](#features)
+* [Hardware](#hardware)
+* [Button Controls](#button-controls)
+* [Wiring](#wiring-quick-reference)
+* [Power](#power-4x18650-battery-system)
+* [Pinout](#pinout)
+* [Firmware Setup](#firmware-setup-arduino-ide)
+* [Required Libraries](#required-libraries)
+* [Build & Upload](#build--upload)
+* [Serial Commands](#serial-tuning-panel)
+* [How to Use](#how-to-use)
+* [Troubleshooting](#troubleshooting)
+* [Contributing](#contributing)
+* [License](#license)
 
 ---
 
 ## Features
 
-- **Bluetooth A2DP sink** → ES8388 line/headphone out (clean stereo to PAM8406 amp).
-- **Magnet control** via LEDC **PWM** on GPIO 22 (channel 1) with:
-  - adjustable frequency (`f<num>`)
-  - tunable duty window (`d<num>`, `b<num>`).
-- **Audio envelopes** (fast / slow / ultra-slow / peak) drive:
-  - the **coil** (different motion behaviours per preset)
-  - the **LED ring** (patterns and intensity).
-- **8 magnet behaviour modes**:
-  - SMOOTH, SPIKE, BOUNCE, CHAOS, PULSE, WAVE, TREMOLO, BREATH.
-- **10 LED modes**:
-  - rainbow, spectrum, VU, pulse, bass glow, fire, ocean, strobe, chase, sparkle.
-- **Serial tuning panel**:
-  - live control of PWM frequency, sensitivity, attack/release, duty limits, spike intensity  
-  - LED brightness and mode selection  
-  - test pulse and status printout.
-- Designed to be **stable on ESP32 core 2.0.14**.
+* **Dual Input Sources**:
+  + **Bluetooth A2DP sink** for wireless audio
+  + **AUX/Line-In** with auto-detection (switches when cable is plugged in)
+* **Six Physical Buttons** for standalone operation:
+  + Cycle magnet modes (up/down)
+  + Cycle LED effects (up/down)
+  + Switch EQ presets (up/down)
+* **8 Magnet Behavior Modes**:
+  + SMOOTH, SPIKE, BOUNCE, CHAOS, PULSE, WAVE, TREMOLO, BREATH
+* **10 LED Visual Effects**:
+  + Rainbow, Spectrum, VU-Meter, Pulse, Bass Glow, Fire, Ocean, Strobe, Chase, Sparkle
+* **8 EQ Presets**:
+  + Flat, Bass Boost, Treble, Vocal, Rock, Electronic, Jazz, Classical
+* **Magnet control** via LEDC **PWM** on GPIO 22 with:
+  + Adjustable frequency (1-5000 Hz)
+  + Tunable duty window and sensitivity
+  + Real-time envelope followers
+* **Serial tuning panel** for advanced control:
+  + Live parameter adjustment
+  + Test pulses and diagnostics
+  + Status readouts
+* Designed to be **stable on ESP32 core 2.0.14+**
 
 ---
 
 ## Hardware
 
-- **ESP32-A1S / ESP32-Audio-Kit v2.2** (with **ES8388** codec).
-- **WS2812B LED ring** (24 LEDs recommended).
-- **Low-side MOSFET trigger module**  
-  (AOD4184 or similar “MOSFET trigger” module with built-in diode & LED).
-- **Electromagnet** (5–12 V, mounted behind the ferrofluid bottle).
-- **Flyback diode** (often integrated on the trigger module; otherwise add SS34 / 1N5819 / UF4007 across coil).
-- **USB-C PD trigger module** for clean voltage from a PD powerbank or charger.
-- 5 V rail for ESP32 + LEDs; separate or shared rail for coil depending on design.
+### Required Components
+
+* **ESP32-A1S / ESP32-Audio-Kit v2.2** (with **ES8388** codec)
+* **WS2812B LED ring** (24 LEDs recommended)
+* **Low-side MOSFET trigger module** (AOD4184 or similar)
+* **Electromagnet** (5V, 1-2A)
+* **4x18650 Battery Pack** with 5V output
+* **Breadboard Power Module**
+* **Ferrofluid display container**
+
+See [docs/BOM.md](docs/BOM.md) for complete bill of materials.
+
+---
+
+## Button Controls
+
+| Button | GPIO | Function | Action |
+|--------|------|----------|--------|
+| **Button 1** | GPIO 36 | Magnet Mode | Cycle UP through 8 modes |
+| **Button 2** | GPIO 39 | Magnet Mode | Cycle DOWN through 8 modes |
+| **Button 3** | GPIO 34 | LED Effect | Cycle UP through 10 effects |
+| **Button 4** | GPIO 35 | LED Effect | Cycle DOWN through 10 effects |
+| **Button 5** | GPIO 32 | EQ Preset | Cycle UP through 8 presets |
+| **Button 6** | GPIO 33 | EQ Preset | Cycle DOWN through 8 presets |
 
 ---
 
 ## Wiring (quick reference)
 
-5V Rail (from PD trigger) ──> ESP32-A1S 5V
-                           └─> LED Ring 5V
-GND ──> ESP32-A1S GND ──┬─> LED Ring GND
-                        └─> MOSFET Source (S)
+```
+4x18650 Battery Pack (5V Output)
+         |
+    Power Switch
+         |
+  Breadboard Power Module
+    (+ and - rails)
+         |
+         ├──> ESP32-A1S (5V + GND)
+         ├──> LED Ring (5V + GND)
+         └──> Electromagnet + (5V)
 
-LED Ring DIN ──> GPIO 23 (through ~330 Ω recommended)
+LED Ring DIN ──> GPIO 23 (through 330Ω resistor)
+ESP32 GPIO 22 ──> MOSFET Gate
+```
 
-Coil +  ──> +V (coil rail: 5–12 V from PD trigger or dedicated supply)
-Coil −  ──> MOSFET Drain (D)
-
-Flyback diode:
-  Cathode → +V (coil rail)
-  Anode   → Coil − (at coil / MOSFET D)
-
-ESP32 GPIO 22 ──> MOSFET Gate (G)
-  Optional: 100 Ω gate resistor + 100 kΩ pulldown to GND.
-
-The PD trigger module connects to a USB-C PD powerbank and negotiates the desired voltage (e.g. 9–12 V for the coil rail). You can then derive 5 V for the ESP32/LEDs (directly from PD if set to 5 V, or via a buck converter if running coil at higher voltage).
+See [docs/WIRING.md](docs/WIRING.md) for complete instructions.
 
 ---
 
-## Power (USB-C PD Trigger)
+## Power (4x18650 Battery System)
 
-To keep things simple and portable:
-
-- Use a **USB-C PD powerbank** or PD wall adapter.
-- The **PD trigger** negotiates a fixed voltage (5–12 V).
-- Recommended setups:
-  - **Simple / low coil power:** PD trigger at 5 V → ESP32 + LEDs + coil all from 5 V.
-  - **Higher coil power:** PD trigger at 9–12 V → coil on 9–12 V, step down to 5 V for ESP32 + LEDs.
-
-Always respect the **current rating** of your source and watch coil temperature at high duty settings.
+* **Portable operation** with rechargeable batteries
+* **1-1.5 hours** typical runtime
+* **2-4A** typical draw, up to 5A peak
+* Uses quality protected 18650 cells (Samsung, LG, Sony, Panasonic)
 
 ---
 
 ## Pinout
 
-**ESP32-A1S v2.2 (Extended Presets Edition):**
+**Control:**
+* GPIO 22 → MOSFET gate (PWM)
+* GPIO 23 → LED ring DIN
 
-- **GPIO 22** → Coil MOSFET gate (PWM, LEDC channel 1)
-- **GPIO 23** → WS2812B LED ring DIN
+**Buttons:**
+* GPIO 36, 39, 34, 35, 32, 33 (built-in)
 
-**Audio / ES8388 (via AudioTools / AudioBoardStream):**
-
-- **GPIO 27** → I²S BCK
-- **GPIO 25** → I²S WS (LRCK)
-- **GPIO 26** → I²S DATA_OUT (to DAC)
-- **GPIO 35** → I²S DATA_IN (from ADC/mic)
-- **GPIO 0**  → I²S MCLK
-
-> Pins tied to onboard buttons / LEDs / amp enable (5, 18, 19, 21) are avoided to prevent conflicts.
+**I²S Audio:**
+* GPIO 27 → BCK
+* GPIO 25 → WS
+* GPIO 26 → DATA_OUT
 
 ---
 
 ## Firmware Setup (Arduino IDE)
 
-1. **Boards Manager** → install **ESP32 by Espressif** `2.0.14` (recommended baseline).
-2. **Select Board:**  
-   Use **“ESP32 Dev Module”** (works for compile/upload to A1S).
-3. **Partition Scheme:** default is fine.  
-   PSRAM can stay **disabled** unless you know you need it.
+1. Install **ESP32 board support** (v2.0.14+)
+2. Select **"ESP32 Dev Module"**
+3. Install required libraries (see below)
+4. Upload firmware
+5. Connect via Bluetooth or AUX
 
 ---
 
 ## Required Libraries
 
-Install these via **Arduino Library Manager**:
+Install via Arduino Library Manager:
 
-- **Arduino Audio Tools** — audio pipeline, streams  
-  https://github.com/pschatzmann/arduino-audio-tools
-- **Arduino Audio Driver** — ES8388 / AudioKitHAL codec drivers  
-  https://github.com/pschatzmann/arduino-audio-driver
-- **ESP32-A2DP** — Bluetooth A2DP sink/source  
-  https://github.com/pschreibfaul1/ESP32-A2DP
-- **Adafruit NeoPixel** — WS2812 LEDs  
-  https://github.com/adafruit/Adafruit_NeoPixel
+1. **AudioTools** by pschatzmann
+2. **ESP32-A2DP** by pschatzmann
+3. **Adafruit NeoPixel** by Adafruit
 
-> Tip: Remove/disable any old `audiokit` legacy libraries that conflict with `AudioTools` + `AudioDriver`.
+See [docs/LIBRARIES.md](docs/LIBRARIES.md) for detailed installation.
 
 ---
 
 ## Build & Upload
 
-1. Clone this repo or copy the main `.ino` into your Arduino sketch folder (e.g. `FerroWave_ExtendedPresets.ino`).
-2. Select the correct **COM port** for your ESP32-A1S.
-3. Press **Upload**.
-4. Open **Serial Monitor** at **115200 baud**.
-5. Pair your phone/PC via Bluetooth (device name e.g. `FerroWave_BackCoil`) and start playing music.
+1. Clone repository
+2. Open `.ino` file in Arduino IDE
+3. Select COM port
+4. Press **Upload**
+5. Open Serial Monitor (115200 baud)
+6. Connect and play music!
 
 ---
 
 ## Serial Tuning Panel
 
-All runtime control is done via the **Serial Monitor (115200 baud)**.
+**Magnet Modes (1-8):**
+```
+1=SMOOTH  2=SPIKE  3=BOUNCE  4=CHAOS
+5=PULSE   6=WAVE   7=TREMOLO 8=BREATH
+```
 
-You can:
+**LED Modes (c1-c10):**
+```
+c1=Rainbow  c2=Spectrum  c3=Pulse    c4=VU-Meter  c5=Bass Glow
+c6=Fire     c7=Ocean     c8=Strobe   c9=Chase     c10=Sparkle
+```
 
-- switch between **8 magnet modes** (`1`–`8`)
-- switch between **10 LED modes** (`c1`–`c10`)
-- tweak **tuning parameters** (`f`, `s`, `a`, `r`, `d`, `b`, `p`, `l`)
-- run **test pulses** and view **status readouts**
+**Parameters:**
+```
+f<num> = PWM frequency    s<num> = Sensitivity
+a<num> = Attack speed     r<num> = Release speed
+d<num> = Max duty         b<num> = Base duty
+p<num> = Spike intensity  l<num> = LED brightness
+v<num> = Volume
+```
 
-### Magnet Modes (1–8)
+**Utilities:**
+```
+? = Show settings    t = Test pulse
+m = List modes       n = List LED modes
+aux = Switch to AUX  bt = Switch to Bluetooth
+```
 
-Command | Mode     | Description
--------:|----------|----------------------------------------------------------
-1       | SMOOTH   | Gentle flowing waves, slow response
-2       | SPIKE    | Sharp transients, emphasizes beats/spikes
-3       | BOUNCE   | Rhythmic pumping, follows groove
-4       | CHAOS    | Aggressive, unpredictable, pushes power envelope
-5       | PULSE    | Distinct on/off pulses based on beat detection
-6       | WAVE     | Slow building surges, energy accumulation
-7       | TREMOLO  | Rapid flutter / vibrato-style motion
-8       | BREATH   | Slow meditative breathing, ultra-smooth “breathing”
-
----
-
-### LED Modes (c1–c10)
-
-Use `c<num>` (e.g. `c3`, `c8`) to select LED mode.
-
-Command | Mode      | Description
--------:|-----------|----------------------------------------------
-c1      | Rainbow   | Classic spinning rainbow wheel
-c2      | Spectrum  | Bar graph analyzer (bottom-up)
-c3      | Pulse     | Single blue color breathing
-c4      | VU-Meter  | Center-split bar / VU-style meter
-c5      | Bass Glow | Red glow that intensifies with bass / env
-c6      | Fire      | Flickering fire/flame effect
-c7      | Ocean     | Blue-green waves (calming)
-c8      | Strobe    | White flash on loud peaks
-c9      | Chase     | Three colored dots chasing around the ring
-c10     | Sparkle   | Random sparkles / twinkling points
-
----
-
-### Tuning Parameters
-
-Pattern: `letter<number>`  
-Examples: `f4`, `s120`, `a80`, `l180` …
-
-Command | Parameter       | Range       | Default | Description
--------:|-----------------|------------|---------|-----------------------------------------------
-f<num>  | PWM Frequency   | 1–5000 Hz  | f4      | How fast the magnet pulses
-s<num>  | Sensitivity     | 0–200 %    | s100    | How strongly audio drives motion
-a<num>  | Attack Speed    | 0–100      | a60     | How fast magnet responds to peaks
-r<num>  | Release Speed   | 0–100      | r30     | How fast magnet relaxes / decays
-d<num>  | Max Duty        | 10–100 %   | d80     | Maximum power ceiling (coil safety)
-b<num>  | Base Duty       | 0–50 %     | b15     | Minimum always-on power (baseline field)
-p<num>  | Spike Intensity | 0–100      | p50     | Extra boost for SPIKE / transient-heavy modes
-l<num>  | LED Brightness  | 0–255      | l100    | LED strip brightness
-
----
-
-### Utility Commands
-
-Command | Function
--------:|---------
-?       | Show all current settings
-m       | List all magnet modes
-n       | List all LED modes
-i       | Show detailed parameter info / explanations
-t       | Test pulse (2 sec full power + LED flash)
-
----
-
-## Recommended Presets
-
-You can treat these as “scenes” by typing each command sequence into the Serial Monitor.
-
-### Spike Party (aggressive spikes)
-
-2       # SPIKE mode
-c8      # Strobe LEDs
-f4      # slow visible pulsing
-s150    # very sensitive
-a90     # fast attack
-r40     # moderate release
-p80     # strong spikes
-
-### Chill Waves (relaxing)
-
-8       # BREATH mode
-c7      # Ocean LEDs
-f2      # very slow pulse
-s60     # subtle
-a30     # slow attack
-r20     # slow release
-
-### Dance Floor (pumping bass)
-
-3       # BOUNCE mode
-c2      # Spectrum LEDs
-f10     # visible bounce
-s120    # sensitive
-a80     # snappy
-r60     # quick release
-
-### Fire Show (dramatic)
-
-4       # CHAOS mode
-c6      # Fire LEDs
-f500    # smooth high-frequency PWM
-s140    # intense sensitivity
-a85     # fast response
-d90     # allow higher power (watch thermals)
-
-### Beat Sync (tight pulses)
-
-5       # PULSE mode
-c4      # VU-Meter LEDs
-f1000   # fast PWM
-a95     # near-instant attack
-r85     # quick drop
-p60     # medium pulse strength
-
-### Psychedelic (trippy)
-
-7       # TREMOLO mode
-c1      # Rainbow LEDs
-f50     # mid-range flutter
-s130    # sensitive
-
-### Ambient (slow building)
-
-6       # WAVE mode
-c5      # Bass Glow LEDs
-f4      # slow
-s80     # moderate sensitivity
-a40     # slow build
-r30     # sustain
-
-### Strobe Party (intense)
-
-2       # SPIKE mode
-c8      # Strobe LEDs
-f1000   # smooth PWM
-s180    # extreme sensitivity
-a100    # max attack
-p100    # max spikes
-l255    # max LED brightness
-
----
-
-## Quick Tips
-
-**For more spikes / deformation:**
-
-- Higher **attack**: a80–a100
-- Higher **spike intensity**: p70–p100
-- Use **SPIKE** (2) or **CHAOS** (4)
-- Lower PWM frequency: f4–f10
-
-**For smooth, flowing behaviour:**
-
-- Lower attack/release: a30, r20
-- Use **SMOOTH** (1) or **BREATH** (8)
-- Higher PWM frequency: f500–f1000
-
-**For rhythmic bouncing:**
-
-- Use **BOUNCE** (3) or **PULSE** (5)
-- Similar attack/release (e.g. a70, r70)
-- PWM around f10–f50
-
-**Power management (coil safety):**
-
-- Start with d60–d80
-- Only push to d90–d100 if PSU & thermals can handle it
-- Use b10–b20 for a gentle constant field
-
----
-
-## Parameter Cheat Sheet
-
-**PWM Frequency (f<num>):**
-
-- f2–f10: slow breathing, visible pulsing  
-- f50–f500: smooth mid-range control  
-- f1000–f2000: very fast, nearly continuous force
-
-**Sensitivity (s<num>):**
-
-- s50: subtle, needs louder music  
-- s100: default  
-- s150+: aggressive, reacts to small changes  
-
-**Attack / Release (a<num>, r<num>):**
-
-- Low (10–40): smooth, sluggish  
-- Mid (50–70): musical, responsive  
-- High (80–100): snappy, percussive  
+See [commands.md](commands.md) for complete reference.
 
 ---
 
 ## How to Use
 
-1. Flash the firmware and open Serial Monitor at 115200 baud.
-2. Pair your phone/PC over Bluetooth (`FerroWave_BackCoil` or similar).
-3. Start playing music.
-4. Select:
-   - a magnet mode (1–8), and
-   - an LED mode (c1–c10).
-5. Optionally apply one of the preset combos above.
-6. Watch ferrofluid + LEDs react in real time.
+### Standalone (No Computer)
+1. Power on
+2. Connect Bluetooth or plug AUX cable
+3. Play music
+4. Use buttons to control presets
+
+### Advanced (Serial Monitor)
+1. Connect USB
+2. Open Serial Monitor (115200 baud)
+3. Use commands for fine tuning
+4. Type `?` for current settings
 
 ---
 
 ## Troubleshooting
 
-- **No Bluetooth audio**
-  - Make sure `ESP32-A2DP` is installed and the sketch compiled cleanly.
-  - Verify you’re paired with the correct BT name.
-  - Try power-cycling after upload.
+**No power?** Check battery charge and connections  
+**No audio?** Verify Bluetooth pairing or AUX cable  
+**Coil not working?** Test with `t` command  
+**LEDs dark?** Try `l255` and check GPIO 23
 
-- **LED ring is dark**
-  - Check DIN on GPIO 23 and that GND is shared.
-  - Verify `Adafruit NeoPixel` is installed.
-  - Try `l255` + `c1` to force a visible pattern at full brightness.
-
-- **Coil always on / always off**
-  - Check MOSFET wiring: S→GND, D→coil−, coil+ → +V.
-  - Confirm flyback diode orientation (if external).
-  - Use `t` to trigger a 2s test pulse and see if the MOSFET LED reacts.
-
-- **Random resets / glitches**
-  - Use a solid PSU or PD powerbank (2–3 A).  
-  - Consider separating the coil rail or adding bulk caps near the coil and board.
+See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for complete guide.
 
 ---
 
-## Roadmap / What’s Next
+## Contributing
 
-Planned next steps for this project:
+Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-- **3D-printable enclosure**  
-  - Adapt enclosure design to:
-    - ESP32-A1S board  
-    - MOSFET trigger module  
-    - USB-C PD trigger  
-    - Magnet + bottle + LED ring stack  
-  - Goals: easy assembly, good cooling, nice desk presence.
-
-- **GitHub polish**
-  - Finalize wiring diagrams and BOM.
-  - Provide photos/renders of a clean, non-breadboard build.
-  - Possibly split into:
-    - **User firmware** (simple presets)
-    - **Dev firmware** (full serial tuning playground).
-
-- **Backer / kit variants (for future)**
-  - Define what a “kit” vs. “DIY files only” vs. “assembled unit” entails.
+**This project was crowdfunded by the MakerWorld community!**
 
 ---
 
-## Repository Layout
+## Community & Support
 
-- `FerroWave_ExtendedPresets.ino` — main sketch (magnet + LED presets, serial panel).
-- `README.md` — this file.
-- `hardware/` — schematics, wiring, PD trigger + MOSFET details (planned).
-- `enclosure/` — 3D models / STLs for the case and bottle mount (planned).
+* **Issues**: [GitHub Issues](https://github.com/matoslav/FerroWave/issues)
+* **Discussions**: [GitHub Discussions](https://github.com/matoslav/FerroWave/discussions)
+* **MakerWorld**: https://makerworld.com/en/crowdfunding/70-ferrowave
+
+---
+
+## Credits
+
+**Created by**: Makarov87  
+**Crowdfunded by**: MakerWorld Community
+
+**Libraries:**
+* [AudioTools](https://github.com/pschatzmann/arduino-audio-tools) by pschatzmann
+* [ESP32-A2DP](https://github.com/pschatzmann/ESP32-A2DP) by pschatzmann
+* [Adafruit NeoPixel](https://github.com/adafruit/Adafruit_NeoPixel) by Adafruit
+
+**Special Thanks:**
+* All MakerWorld backers
+* Open-source Arduino and ESP32 communities
+* Everyone who contributed ideas and feedback
 
 ---
 
 ## License
 
-TBD (likely MIT or similar permissive license).
+MIT License - See [LICENSE](LICENSE) file.
+
+**Author**: Makarov87  
+**Crowdfunded by**: MakerWorld Community
+
+When using or modifying FerroWave:
+- Credit Makarov87
+- Link to https://github.com/matoslav/FerroWave
+- Acknowledge MakerWorld crowdfunding
+
+---
+
+**Created by Makarov87**  
+**Crowdfunded by the MakerWorld Community**  
+**Built with ❤️ and ferrofluid**
+
+Thank you to all MakerWorld backers! 🙏
