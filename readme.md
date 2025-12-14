@@ -8,7 +8,6 @@ Streams Bluetooth audio (A2DP) or AUX input into the on-board codec, extracts li
 * **Six onboard buttons** for live preset control (no computer needed!)
 
 > Created by **Makarov87** and **crowdfunded by the MakerWorld community**.  
-> Goal: a clean, reproducible prototype you can flash, tune from buttons or Serial Monitor, and extend.
 
 **Crowdfunding Campaign:** https://makerworld.com/en/crowdfunding/70-ferrowave
 
